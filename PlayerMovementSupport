@@ -1,0 +1,713 @@
+module FProject(
+		CLOCK_50,
+        KEY,
+        SW,
+				// The ports below are for the VGA output
+				VGA_CLK,   						//	VGA Clock
+				VGA_HS,							//	VGA H_SYNC
+				VGA_VS,							//	VGA V_SYNC
+				VGA_BLANK_N,						//	VGA BLANK
+				VGA_SYNC_N,						//	VGA SYNC
+				VGA_R,   						//	VGA Red[9:0]
+				VGA_G,	 						//	VGA Green[9:0]
+				VGA_B   						//	VGA Blue[9:0]
+	);
+
+	input CLOCK_50;
+	input [3:0]SW;
+	input [3:0]KEY;
+	wire goCount;
+	wire [2:0]OGRamData;
+	wire [5:0]addyCount;
+	wire [5:0]playerLoc;
+	wire [5:0]FSMinPLoc;
+	wire [2:0]move;
+	wire WREN;
+	wire [5:0]AddyMux2Ram;
+	wire [2:0]DataMux2Ram;
+	wire [2:0]RamData2FSM;
+	wire [5:0]address2Draw;
+	wire [2:0]data2VGA;
+	wire SlowClock;
+	wire [5:0]FSMAddyOut;
+	wire [5:0]FSMDataOut;
+	// Do not change the following outputs
+	output	VGA_CLK;   				//	VGA Clock
+	output	VGA_HS;					//	VGA H_SYNC
+	output	VGA_VS;					//	VGA V_SYNC
+	output	VGA_BLANK_N;				//	VGA BLANK
+	output	VGA_SYNC_N;				//	VGA SYNC
+	output	[9:0]	VGA_R;   			//	VGA Red[9:0]
+	output	[9:0]	VGA_G;	 			//	VGA Green[9:0]
+	output	[9:0]	VGA_B;   			//	VGA Blue[9:0]
+
+	wire resetn;
+	assign resetn = SW[1]; //USED TO RESET THE VGA WHEN HIGH
+
+	// Create the colour, x, y and writeEn wires that are inputs to the controller.
+	wire [5:0] x;
+	wire [5:0] y;
+	wire writeEn;
+
+	//DATAPATH AND FSM
+
+	//stores player's current location used as an input for our fsm
+	reg6 playerLocation(
+	.D(playerLoc),
+	.Q(FSMinPLoc),
+	.reset(SW[0]),
+	.CLK(CLOCK_50));
+
+	//our ram module that contains information such as what tiles objects are on the board
+	hh ram64x3(
+	.address(AddyMux2Ram),
+	.clock(CLOCK_50),
+	.data(DataMux2Ram),
+	.wren(WREN),
+	.q(RamData2FSM));
+
+	//original ram module used to reset the other ram.
+	hh OGram64x3(
+	.address(addyCount[5:0]),
+	.clock(CLOCK_50),
+	.data(3'b000),
+	.wren(1'b0),
+	.q(OGRamData[2:0]));
+
+	//crucial for delivering outputs to our datapath that controls player movement
+	PlayerMovementFSM controlla(
+	.Direction(move),
+	.playerLocation(FSMinPLoc),
+	.clk(SlowClock),
+	.resetboard(SW[0]),
+	.resetn(1'b0),
+	.newPlayerLoc(playerLoc),
+	.go(goCount),
+	.RamData(RamData2FSM),
+	.WREN(WREN),
+	.fsmAddyOut(FSMAddyOut),
+	.fsmDataOut(FSMDataOut));
+
+	//Sequentially counts from 0 to 63 on input go
+	addyCounter county(
+	.go(goCount),
+	.clk(CLOCK_50),
+	.add_out(addyCount));
+
+	Mux2to1Addy muxy1(
+	.a(FSMAddyOut),
+	.b(addyCount),
+	.select(SW[0]),
+	.c(AddyMux2Ram));
+
+	Mux2to1Data muxy2(
+	.a(FSMDataOut),
+	.b(OGRamData[2:0]),
+	.select(SW[0]),
+	.c(DataMux2Ram[2:0]));
+
+	//takes a key input and outputs what direction a player moves
+	KeyDecoder kevo(
+	.clk(SlowClock),
+	.keyin(KEY[3:0]),
+	.move(move));
+
+	//The Link to VGA input creates 8x8 square on VGA
+	draw_cord dc(
+	.clk(CLOCK_50),
+	.resetn(),
+	.a_in(address2Draw[5:0]),
+	.x_out(x[5:0]),
+	.y_out(y[5:0]));
+
+	Mux2to1Addy Muxy3(
+	.a(AddyMux2Ram),
+	.b(addyCount[5:0]),
+	.select(SW[0]),
+	.c(address2Draw[5:0]));
+
+	Mux2to1Data Muxy4(
+	.a(RamData2FSM),
+	.b(OGRamData[2:0]),
+	.select(SW[0]),
+	.c(data2VGA[2:0]));
+
+	divider slowTime(
+	.clk(CLOCK_50),
+	.resetn(SW[3]),
+	.out_c(SlowClock));
+endmodule
+
+module addyCounter(go, clk, add_out);
+	input clk;
+	input go;
+	output reg [5:0]add_out;
+	always@(posedge clk)begin
+		if (go)
+			add_out <= 6'b000000;
+		else if (add_out == 6'b111111)
+			add_out <= 6'b111111;
+		else
+			add_out <= add_out + 1'b1;
+	end
+endmodule
+
+module Mux2to1Addy(a, b, select, c);
+	input [5:0]a;
+	input [5:0]b;
+	input select;
+	output reg [5:0]c;
+
+	always @(*)
+		case(select)
+			1'b0 : c = a;
+			1'b1 : c = b;
+		endcase
+endmodule
+
+module divider(clk, resetn, out_c);
+	input clk;
+	input resetn;
+
+	output reg out_c = 1'b0;
+	reg [5:0] counter;
+
+	always@(posedge resetn or posedge clk) begin
+    		if (resetn == 1'b1) begin
+            	    out_c <= 1'b0;
+                    counter <= 0;
+        	end
+                else begin
+                    counter <= counter + 1;
+                    if (counter == 6'd60) begin
+                        counter <= 0;
+                        out_c <= ~out_c;
+                    end
+                end
+	end
+endmodule
+
+module Mux2to1Data(a, b, select, c);
+	input [2:0]a;
+	input [2:0]b;
+	input select;
+	output reg [2:0]c;
+
+	always @(*)
+		case(select)
+			1'b0 : c = a[2:0];
+			1'b1 : c = b[2:0];
+		endcase
+endmodule
+
+module reg6 (D, Q, reset, CLK);
+	input reset;
+	input CLK;
+	input [5:0]D;
+	output reg [5:0]Q;
+	always @(posedge CLK or posedge reset)
+		if (reset)
+			Q <= 6'b000000;
+		else
+			Q <= D;
+endmodule
+
+module KeyDecoder(keyin, move, clk);
+	input [3:0]keyin;
+	input clk;
+	output reg [2:0]move;
+
+	always@(posedge clk, posedge keyin[0], posedge keyin[1], posedge keyin[2], posedge keyin[3])
+	begin: key_decode
+		move <= 3'b000;
+    	if(keyin[0]) begin
+			move <= 3'b100;
+		end else if(keyin[1]) begin
+			move <= 3'b011;
+		end else if(keyin[2]) begin
+			move <= 3'b001;
+		end else if(keyin[3]) begin
+			move <= 3'b010;
+		end else begin
+			move <= 3'b000;
+		end
+	end
+endmodule
+
+module draw_cord(clk, resetn, a_in, x_out, y_out);
+	input clk;
+	input resetn;
+	input [5:0] a_in;
+
+	reg [5:0] x_i, y_i;
+
+	output reg [5:0] x_out, y_out;
+
+	reg [2:0] r = 3'b000;
+	reg [2:0] c = 3'b000;
+	always@(posedge clk)
+	begin
+		x_i <= (a_in % 4'd8) * 4'd8;
+		y_i <= (a_in / 4'd8) * 4'd8;
+
+		if (resetn == 1'b1)
+		begin
+			r = 3'b000;
+			c = 3'b000;
+		end
+		else
+		begin
+			x_out <= x_i + c;
+			y_out <= y_i + r;
+			r <= (c == 3'b111) ? r + 1: r;
+			c <= (c == 3'b111) ? 3'b000 : c + 1;
+		end
+	end
+endmodule
+
+module PlayerMovementFSM(Direction, playerLocation, clk, resetboard, resetn, newPlayerLoc, go, WREN, RamData, fsmAddyOut, fsmDataOut);
+    input [2:0]Direction; //assume 000 is up, 001 is left, 010 is right, 011 is down
+    input clk;
+    input resetn;
+    input resetboard;
+    input [2:0]RamData;
+    output reg [5:0]newPlayerLoc;
+    output reg go;
+    output reg WREN;
+    output reg [5:0]fsmAddyOut;
+    output reg [2:0]fsmDataOut;
+    reg [5:0] current_state, next_state;
+
+    localparam  S_CYCLE_0   = 5'd0,
+        UpMove	    		= 5'd1,
+		UpMoveCheckObj  	= 5'd2,
+		CompleteUpMove  	= 5'd3,
+
+        DownMove        	= 5'd4,
+		DownMoveCheckObj	= 5'd5,
+		CompleteDownMove 	= 5'd6,
+
+        LeftMove        	= 5'd7,
+		LeftMoveCheckObj 	= 5'd8,
+		CompleteLeftMove	= 5'd9,
+
+        RightMove       	= 5'd10,
+		RightMoveCheckObj 	= 5'd11,
+		CompleteRightMove 	= 5'd12,
+
+        IllegalMove     	= 5'd13,
+		ResetBoard 			= 5'd14,
+		ResetBoard2     	= 5'd15,
+
+		ResetUpMove = 5'd16,
+		ResetDownMove = 5'd17,
+		ResetLeftMove = 5'd18,
+		ResetRightMove = 5'd19,
+
+		UpMoveCollisionFree = 5'd20,
+		DownMoveCollisionFree = 5'd21,
+		LeftMoveCollisionFree = 5'd22,
+		RightMoveCollisionFree = 5'd23,
+
+		UpMoveCollisionHole = 5'd24,
+		DownMoveCollisionHole = 5'd25,
+		LeftMoveCollisionHole = 5'd26,
+		RightMoveCollisionHole = 5'd27,
+
+		UpMovePause = 5'd28,
+		DownMovePause = 5'd29,
+		LeftMovePause = 5'd30,
+		RightMovePause = 5'd31,
+
+		UpCheckPause = 5'd32,
+		DownCheckPause = 5'd33,
+		LeftCheckPause = 5'd34,
+		RightCheckPause = 5'd35;
+
+    // state table and logic
+    always@(posedge clk) begin
+		case (current_state)
+                	S_CYCLE_0:
+						if (resetboard == 1'b1)
+							next_state = ResetBoard;
+						else if (Direction == 3'b100 && playerLocation > 6'd7)
+        	        		next_state = UpMovePause;
+        	    		else if (Direction == 3'b011 && playerLocation < 6'd56)
+        	        		next_state = DownMovePause;
+        	    		else if (Direction == 3'b001 && playerLocation %8 != 0)
+        	        		next_state = LeftMovePause;
+        	   			else if (Direction == 3'b010 && playerLocation %7 != 0)
+        	        		next_state = RightMovePause;
+						else if (Direction == 3'b000)
+							next_state = S_CYCLE_0;
+						else
+                			next_state = IllegalMove;
+               		UpMove:
+						if (RamData == 3'b111)
+							next_state = CompleteUpMove;
+						else if (RamData == 3'b011 && playerLocation > 6'd15)
+							next_state = UpCheckPause;
+						else
+							next_state = IllegalMove;
+               		DownMove:
+						if (RamData == 3'b111)
+							next_state = CompleteDownMove;
+						else if (RamData == 3'b011 && playerLocation < 6'd48)
+							next_state = DownCheckPause;
+						else
+							next_state = IllegalMove;
+               		LeftMove:
+						if (RamData == 3'b111)
+							next_state = CompleteLeftMove;
+						else if (RamData == 3'b011 && ((playerLocation %8) + 1) != 0)
+							next_state = LeftCheckPause;
+						else
+							next_state = IllegalMove;
+               		RightMove:
+						if (RamData == 3'b111)
+							next_state = CompleteRightMove;
+						else if (RamData == 3'b011 && ((playerLocation %7) - 1) != 0)
+							next_state = RightCheckPause;
+						else
+							next_state = IllegalMove;
+
+					UpMoveCheckObj:
+						if (RamData == 3'b111)
+							next_state = UpMoveCollisionFree;
+						else if (RamData == 3'b001)
+							next_state = UpMoveCollisionHole;
+						else
+							next_state = IllegalMove;
+
+					DownMoveCheckObj:
+						if (RamData == 3'b111)
+							next_state = DownMoveCollisionFree;
+						else if (RamData == 3'b001)
+							next_state = DownMoveCollisionHole;
+						else
+							next_state = IllegalMove;
+
+					RightMoveCheckObj:
+						if (RamData == 3'b111)
+							next_state = RightMoveCollisionFree;
+						else if (RamData == 3'b001)
+							next_state = RightMoveCollisionHole;
+						else
+							next_state = IllegalMove;
+
+					LeftMoveCheckObj:
+						if (RamData == 3'b111)
+							next_state = LeftMoveCollisionFree;
+						else if (RamData == 3'b001)
+							next_state = LeftMoveCollisionHole;
+						else
+							next_state = IllegalMove;
+
+					UpMovePause: next_state = CompleteUpMove;
+					DownMovePause: next_state = CompleteDownMove;
+					RightMovePause: next_state = CompleteRightMove;
+					LeftMovePause: next_state = CompleteLeftMove;
+
+					UpCheckPause: next_state = UpMoveCheckObj;
+					DownCheckPause: next_state = DownMoveCheckObj;
+					RightCheckPause: next_state = RightMoveCheckObj;
+					LeftCheckPause: next_state = LeftMoveCheckObj;
+
+					UpMoveCollisionFree: next_state = CompleteUpMove;
+					DownMoveCollisionFree: next_state = CompleteDownMove;
+					RightMoveCollisionFree: next_state = CompleteRightMove;
+					LeftMoveCollisionFree: next_state = CompleteLeftMove;
+
+					UpMoveCollisionHole: next_state = CompleteUpMove;
+					DownMoveCollisionHole: next_state = CompleteDownMove;
+					LeftMoveCollisionHole: next_state = CompleteLeftMove;
+					RightMoveCollisionHole: next_state = CompleteRightMove;
+
+					CompleteUpMove: next_state = ResetUpMove;
+					CompleteDownMove: next_state = ResetDownMove;
+					CompleteLeftMove: next_state = ResetLeftMove;
+					CompleteRightMove: next_state = ResetRightMove;
+
+					ResetUpMove: next_state = S_CYCLE_0;
+					ResetDownMove: next_state = S_CYCLE_0;
+					ResetLeftMove: next_state = S_CYCLE_0;
+					ResetRightMove: next_state = S_CYCLE_0;
+
+					ResetBoard: next_state = ResetBoard2;
+					ResetBoard2: next_state = S_CYCLE_0;
+
+          	  		default: next_state = S_CYCLE_0;
+        	endcase
+    	end
+
+    // Output logic aka all of our datapath control signals
+    always @(current_state) begin
+        newPlayerLoc <= newPlayerLoc;
+		go <= 1'b0;
+		WREN <= 1'b0;
+
+        case (current_state)
+            //Do Nothing
+			S_CYCLE_0: begin
+            	newPlayerLoc <= playerLocation;
+				fsmDataOut <= 3'b010;
+				fsmAddyOut <= playerLocation;
+				go <= 1'b0;
+            end
+
+			//Reseting the Board
+			ResetBoard: begin
+				go <= 1'b1;
+				newPlayerLoc <= 6'b000000;
+	    	end
+	   	 	ResetBoard2: begin
+				go <= 1'b0;
+				newPlayerLoc <= 6'b000000;
+	    		end
+
+	    	//Begin the up move sequence
+            UpMovePause: begin
+				WREN <= 1'b0;
+				fsmDataOut <= 3'b010;
+				fsmAddyOut <= playerLocation -6'd8;
+            end
+            UpMove: begin
+				WREN <= 1'b0;
+				fsmDataOut <= 3'b010;
+				fsmAddyOut <= playerLocation -6'd8;
+            end
+			UpCheckPause: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation -6'd16;
+			end
+			UpMoveCheckObj: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation -6'd16;
+			end
+	    	CompleteUpMove: begin
+				newPlayerLoc <= playerLocation -6'd8;
+				fsmDataOut <= 3'b010;
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation;
+	    	end
+			UpMoveCollisionFree: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation -6'd16;
+				fsmDataOut <= 3'b011;
+			end
+			UpMoveCollisionHole: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation -6'd16;
+				fsmDataOut <= 3'b111;
+			end
+			ResetUpMove: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation +6'd8;
+				fsmDataOut <= 3'b111;
+            end
+	    	//Begin the down move sequence
+            DownMovePause: begin
+				WREN <= 1'b0;
+        		fsmAddyOut <= playerLocation + 6'd8;
+				fsmDataOut <= 3'b010;
+            end
+            DownMove: begin
+				WREN <= 1'b0;
+        		fsmAddyOut <= playerLocation + 6'd8;
+				fsmDataOut <= 3'b010;
+            end
+			DownCheckPause: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation +6'd16;
+	    	end
+			DownMoveCheckObj: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation +6'd16;
+	    	end
+	    	CompleteDownMove: begin
+				WREN <= 1'b1;
+				newPlayerLoc <= playerLocation +6'd8;
+				fsmAddyOut <= playerLocation;
+				fsmDataOut <= 3'b010;
+	    	end
+			DownMoveCollisionFree: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation +6'd16;
+				fsmDataOut <= 3'b011;
+			end
+			DownMoveCollisionHole: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation +6'd16;
+				fsmDataOut <= 3'b111;
+			end
+			ResetDownMove: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation -6'd8;
+				fsmDataOut <= 3'b111;
+			end
+
+	    	//Begin the left move sequence
+            LeftMovePause: begin
+				WREN <= 1'b0;
+        		fsmAddyOut <= playerLocation -6'd1;
+				fsmDataOut <= 3'b010;
+            end
+            LeftMove: begin
+				WREN <= 1'b0;
+        		fsmAddyOut <= playerLocation -6'd1;
+				fsmDataOut <= 3'b010;
+            end
+			LeftCheckPause: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation -6'd2;
+	    	end
+			LeftMoveCheckObj: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation -6'd2;
+	    	end
+	    	CompleteLeftMove: begin
+				newPlayerLoc <= playerLocation -6'd1;
+				fsmAddyOut <= playerLocation;
+				fsmDataOut <= 3'b010;
+				WREN <= 1'b1;
+	    	end
+			LeftMoveCollisionFree: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation -6'd2;
+				fsmDataOut <= 3'b011;
+			end
+			LeftMoveCollisionHole: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation -6'd2;
+				fsmDataOut <= 3'b111;
+			end
+			ResetLeftMove: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation +6'd1;
+				fsmDataOut <= 3'b111;
+			end
+
+            //Begin the right move sequence
+            RightMovePause: begin
+				WREN <= 1'b0;
+        		fsmAddyOut <= playerLocation +6'd1;
+				fsmDataOut <= 3'b010;
+            end
+            RightMove: begin
+				WREN <= 1'b0;
+        		fsmAddyOut <= playerLocation +6'd1;
+				fsmDataOut <= 3'b010;
+            end
+			RightCheckPause: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation +6'd2;
+	    	end
+			RightMoveCheckObj: begin
+				WREN <= 1'b0;
+				fsmAddyOut <= playerLocation +6'd2;
+	    	end
+	   	 	CompleteRightMove: begin
+				newPlayerLoc <= playerLocation +6'd1;
+				fsmAddyOut <= playerLocation;
+				fsmDataOut <= 3'b010;
+				WREN <= 1'b1;
+	    	end
+			RightMoveCollisionFree: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation +6'd2;
+				fsmDataOut <= 3'b011;
+			end
+			RightMoveCollisionHole: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation +6'd2;
+				fsmDataOut <= 3'b111;
+			end
+			ResetRightMove: begin
+				WREN <= 1'b1;
+				fsmAddyOut <= playerLocation -6'd1;
+				fsmDataOut <= 3'b111;
+			end
+			//Illegal Move
+	    	IllegalMove: begin
+            	newPlayerLoc <= playerLocation;
+            end
+        endcase
+    end
+
+    // current_state registers
+    always@(posedge clk)
+    begin: state_FFs
+        if (resetn == 1'b0)
+            current_state <= next_state;
+        else
+            current_state <= S_CYCLE_0;
+    end
+endmodule
+
+// synopsys translate_off //Quartus' generated 64x3 bit ram module
+`timescale 1 ps / 1 ps
+// synopsys translate_on
+module hh (
+	address,
+	clock,
+	data,
+	wren,
+	q);
+
+	input	[5:0]  address;
+	input	  clock;
+	input	[2:0]  data;
+	input	  wren;
+	output	[2:0]  q;
+`ifndef ALTERA_RESERVED_QIS
+// synopsys translate_off
+`endif
+	tri1	  clock;
+`ifndef ALTERA_RESERVED_QIS
+// synopsys translate_on
+`endif
+
+	wire [2:0] sub_wire0;
+	wire [2:0] q = sub_wire0[2:0];
+
+	altsyncram	altsyncram_component (
+				.address_a (address),
+				.clock0 (clock),
+				.data_a (data),
+				.wren_a (wren),
+				.q_a (sub_wire0),
+				.aclr0 (1'b0),
+				.aclr1 (1'b0),
+				.address_b (1'b1),
+				.addressstall_a (1'b0),
+				.addressstall_b (1'b0),
+				.byteena_a (1'b1),
+				.byteena_b (1'b1),
+				.clock1 (1'b1),
+				.clocken0 (1'b1),
+				.clocken1 (1'b1),
+				.clocken2 (1'b1),
+				.clocken3 (1'b1),
+				.data_b (1'b1),
+				.eccstatus (),
+				.q_b (),
+				.rden_a (1'b1),
+				.rden_b (1'b1),
+				.wren_b (1'b0));
+	defparam
+		altsyncram_component.clock_enable_input_a = "BYPASS",
+		altsyncram_component.clock_enable_output_a = "BYPASS",
+		altsyncram_component.init_file = "W:/final_project/init.mif",
+		altsyncram_component.intended_device_family = "Cyclone V",
+		altsyncram_component.lpm_hint = "ENABLE_RUNTIME_MOD=NO",
+		altsyncram_component.lpm_type = "altsyncram",
+		altsyncram_component.numwords_a = 64,
+		altsyncram_component.operation_mode = "SINGLE_PORT",
+		altsyncram_component.outdata_aclr_a = "NONE",
+		altsyncram_component.outdata_reg_a = "UNREGISTERED",
+		altsyncram_component.power_up_uninitialized = "FALSE",
+		altsyncram_component.read_during_write_mode_port_a = "NEW_DATA_NO_NBE_READ",
+		altsyncram_component.widthad_a = 6,
+		altsyncram_component.width_a = 3,
+		altsyncram_component.width_byteena_a = 1;
+endmodule
